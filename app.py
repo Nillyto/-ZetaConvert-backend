@@ -9,9 +9,9 @@ from flask_cors import CORS
 # =========================
 # Config & Constantes
 # =========================
-MAX_UPLOAD_MB = 10
+MAX_UPLOAD_MB = 10  # límite de subida
 
-# Salidas soportadas -> (PIL_SAVE_FORMAT, MIME)
+# Formatos de salida soportados -> (PIL_SAVE_FORMAT, MIME)
 TARGETS = {
     "png":  ("PNG",  "image/png"),
     "jpg":  ("JPEG", "image/jpeg"),
@@ -43,7 +43,7 @@ def pick_target(raw: str) -> Tuple[str, str]:
 def prepare_modes(img: Image.Image, pil_fmt: str) -> Image.Image:
     """Ajusta modos/alpha según formato de salida."""
     if pil_fmt == "JPEG":
-        # JPEG no soporta alpha → a RGB con fondo blanco si hace falta
+        # JPEG no soporta alpha → convertir a RGB con fondo blanco si hace falta
         if img.mode in ("RGBA", "LA") or ("transparency" in img.info):
             bg = Image.new("RGB", img.size, (255, 255, 255))
             if img.mode != "RGBA":
@@ -62,28 +62,26 @@ def prepare_modes(img: Image.Image, pil_fmt: str) -> Image.Image:
 def hex_to_rgb(h: str):
     h = (h or "").strip().lstrip("#")
     if len(h) == 3:
-        h = "".join([c * 2 for c in h])
+        h = "".join([c * 2 for c in h])  # #abc -> #aabbcc
     if len(h) != 6:
         abort(400, "Color inválido; usar #RRGGBB")
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 def color_dist(c, ref):
-    # Distancia Manhattan rápida
+    # Distancia Manhattan rápida (suficiente)
     return abs(c[0] - ref[0]) + abs(c[1] - ref[1]) + abs(c[2] - ref[2])
 
 def avg_border_color(img: Image.Image):
+    """Promedio de color del borde completo (arriba/abajo/izq/der)."""
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGBA")
     px = img.load()
     w, h = img.size
-    total = [0, 0, 0]
-    count = 0
-    # top & bottom
+    total = [0, 0, 0]; count = 0
     for x in range(w):
         for y in (0, h - 1):
             r, g, b = px[x, y][:3]
             total[0] += r; total[1] += g; total[2] += b; count += 1
-    # left & right
     for y in range(h):
         for x in (0, w - 1):
             r, g, b = px[x, y][:3]
@@ -92,12 +90,12 @@ def avg_border_color(img: Image.Image):
 
 def remove_bg_floodfill(img: Image.Image, tolerance=30, ref_color=None):
     """
-    Hace transparente lo conectado al BORDE que sea parecido al color de referencia.
-    - ref_color: (R,G,B) o None → auto (promedio del borde)
-    - tolerance: 0..100 (mapeado a ~0..210)
+    Hace transparente lo conectado al BORDE con color similar al de referencia.
+    - ref_color: (R,G,B) o None → usa promedio del borde
+    - tolerance: 0..100 (mapeado interno ~0..210)
     """
     tol = max(0, min(100, int(tolerance)))
-    thr = int(2.1 * tol)  # rango útil
+    thr = int(2.1 * tol)  # umbral útil
 
     if img.mode != "RGBA":
         img = img.convert("RGBA")
@@ -121,7 +119,7 @@ def remove_bg_floodfill(img: Image.Image, tolerance=30, ref_color=None):
                 make_transp[y][x] = True
                 q.append((x, y))
 
-    # Inicial: todos los bordes “parecidos” al color ref
+    # Semillas: todos los bordes
     for x in range(w):
         try_push(x, 0)
         try_push(x, h - 1)
@@ -129,7 +127,7 @@ def remove_bg_floodfill(img: Image.Image, tolerance=30, ref_color=None):
         try_push(0, y)
         try_push(w - 1, y)
 
-    # Expandir (4-neighbors)
+    # Expandir (4 vecinos)
     while q:
         x, y = q.popleft()
         for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
@@ -142,7 +140,7 @@ def remove_bg_floodfill(img: Image.Image, tolerance=30, ref_color=None):
                 else:
                     visited[ny][nx] = True
 
-    # Construir salida con canales alfa
+    # Construir salida con alpha 0 donde corresponde
     out = Image.new("RGBA", (w, h))
     dst = out.load()
     for y in range(h):
@@ -180,6 +178,7 @@ def convert():
     if not target_raw:
         abort(400, "Falta el parámetro 'target' (png, jpg, webp, bmp, tiff)")
 
+    # Opciones de remover fondo (solo aplica cuando target=png)
     remove_bg = (request.form.get("remove_bg") == "1") or (request.args.get("remove_bg") == "1")
     tolerance = int(request.form.get("tolerance", "30"))
     mode = (request.form.get("remove_bg_mode") or "auto").lower()  # "auto" | "color"
@@ -189,21 +188,24 @@ def convert():
 
     try:
         img = Image.open(f.stream)
-        img = ImageOps.exif_transpose(img)
+        img = ImageOps.exif_transpose(img)  # corrige orientación
     except Exception:
         abort(400, "El archivo no parece ser una imagen válida")
 
     if remove_bg and pil_fmt != "PNG":
         abort(400, "La opción 'eliminar fondo' solo funciona al convertir a PNG")
 
+    # Preparar modo según destino (RGB/RGBA)
     img = prepare_modes(img, pil_fmt)
 
+    # Aplicar eliminación de fondo si corresponde
     if remove_bg and pil_fmt == "PNG":
         ref = None
         if mode == "color":
             ref = hex_to_rgb(ref_hex)
         img = remove_bg_floodfill(img, tolerance=tolerance, ref_color=ref)
 
+    # Serializar a buffer
     buf = io.BytesIO()
     save_kwargs = {}
     if pil_fmt == "PNG":
@@ -232,7 +234,8 @@ def convert():
     )
 
 # =========================
-# Main
+# Main (local)
 # =========================
 if __name__ == "__main__":
+    # para correr local: python app.py
     app.run(host="0.0.0.0", port=5000, debug=True)
